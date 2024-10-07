@@ -1,8 +1,8 @@
 #!/bin/bash
 #SBATCH -c 3                               # Request three cores
-#SBATCH -t 1:00:00                         # Runtime in D-HH:MM format
+#SBATCH -t 2:00:00                         # Runtime in D-HH:MM format
 #SBATCH -p short                           # Partition to run in
-#SBATCH --mem=50G                          # Memory total in MiB (for all cores)
+#SBATCH --mem=100G                          # Memory total in MiB (for all cores)
 #SBATCH --mail-type=FAIL                   # ALL email notification type
 #SBATCH --mail-user=q_wu@g.harvard.edu     # Email to which notifications will be sent
 
@@ -29,3 +29,5 @@ source activate pydeseq2_env
 cd /n/groups/klein/qiu/exp_0070_analysis/220718_Thorough_Analysis/240315_Paper_Writing/Code/IL17_Synergy_Project_Code/GLM_Implementation/
 
 python 241002_GLM_Update.py
+
+rm *.out

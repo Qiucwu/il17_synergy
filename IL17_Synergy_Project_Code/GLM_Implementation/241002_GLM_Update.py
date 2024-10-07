@@ -60,11 +60,11 @@ the model's fit, meaning that the term or interaction is important for explainin
     `expression ~ Organ_SP + EPO + IL17 + EPO:IL17 + Organ_SP:EPO + Organ_SP:IL17`
     - This model omits the **Organ_SP:EPO:IL17** interaction, testing whether the combined effect of **EPO and IL-17** 
       is consistent across organs.
-    
+      
   - **Model 6**: 
-    `expression ~ Organ_SP + EPO + IL17 + EPO:IL17 + Organ_SP:EPO`
-    - This model assumes that **IL-17** has the same effect in different organs, but allows for **EPO** and the **EPO:IL-17** interaction 
-      to vary by organ.
+    `expression ~ Organ_SP + IL17 + EPO + Organ_SP:IL17 + EPO:IL17`
+    - This model omits the **Organ_SP:EPO interaction**, testing whether the effect of **EPO** is consistent across organs.
+
 
 ## Procedure:
 
@@ -135,8 +135,18 @@ formulas = {
     'model_3': 'expression ~ Organ_SP + EPO + Organ_SP:EPO',  # IL17 doesn’t matter
     'model_4': 'expression ~ Organ_SP + EPO + IL17 + Organ_SP:EPO + Organ_SP:IL17',  # IL17:EPO interaction doesn’t matter
     'model_5': 'expression ~ Organ_SP + EPO + IL17 + EPO:IL17 + Organ_SP:EPO + Organ_SP:IL17',  # IL17:EPO interaction ONLY doesn’t vary between organs
-    'model_6': 'expression ~ Organ_SP + EPO + IL17 + EPO:IL17 + Organ_SP:EPO',  # IL17 acts the same in the two organs
+    'model_6': 'expression ~ Organ_SP + IL17 + EPO + Organ_SP:IL17 + EPO:IL17',  # No organ difference in EPO action
 }
+
+# Define which terms are excluded in each reduced model
+excluded_terms = {
+    'model_0': ['Organ_SP', 'Organ_SP:IL17', 'Organ_SP:EPO', 'Organ_SP:EPO:IL17'],
+    'model_1': ['Organ_SP:IL17'],
+    'model_2': ['EPO', 'EPO:IL17', 'Organ_SP:EPO', 'Organ_SP:EPO:IL17'],
+    'model_3': ['IL17', 'IL17:EPO', 'Organ_SP:IL17', 'Organ_SP:EPO:IL17'],
+    'model_4': ['IL17:EPO'],
+    'model_5': ['Organ_SP:EPO:IL17'],
+    'model_6': ['Organ_SP:EPO'],}
 
 adata.obs = metadata
 
@@ -158,7 +168,7 @@ def process_cell_state(cell_state):
         gene_expression = expression_data[gene].values
 
         # Skip genes with low or zero expression
-        if np.mean(gene_expression) < 0.001 or np.var(gene_expression) == 0:
+        if np.mean(gene_expression) < 0.1 or np.var(gene_expression) == 0:
             continue
 
         data['expression'] = gene_expression
@@ -209,6 +219,31 @@ def process_cell_state(cell_state):
                 # Store the LRT statistic and p-value
                 gene_result[f'{model_name}_lrt_stat'] = lr_stat
                 gene_result[f'{model_name}_lrt_pval'] = p_value_lrt
+            
+            # Summarize overall effect of the excluded terms in this model
+                excluded_coef_sum = 0
+                excluded_coef_count = 0
+                for term in excluded_terms.get(model_name, []):
+                    coef_key = f'{term}_coef'
+                    if coef_key in gene_result:
+                        excluded_coef_sum += gene_result.get(coef_key, 0)
+                        excluded_coef_count += 1
+                
+                if excluded_coef_count > 0:
+                    excluded_coef_avg = excluded_coef_sum / excluded_coef_count
+                else:
+                    excluded_coef_avg = 0
+                
+                # Determine overall direction (positive/negative/no effect)
+                if excluded_coef_avg > 0:
+                    gene_result[f'{model_name}_overall_effect'] = 'positive'
+                elif excluded_coef_avg < 0:
+                    gene_result[f'{model_name}_overall_effect'] = 'negative'
+                else:
+                    gene_result[f'{model_name}_overall_effect'] = 'no effect'
+
+                # Calculate the fold change for the average excluded effect
+                gene_result[f'{model_name}_overall_fold_change'] = np.exp(excluded_coef_avg)
 
         except Exception as e:
             print(f"Model fitting failed for gene {gene}: {e}")
@@ -216,6 +251,8 @@ def process_cell_state(cell_state):
             for model_name in formulas.keys():
                 gene_result[f'{model_name}_lrt_stat'] = np.nan
                 gene_result[f'{model_name}_lrt_pval'] = np.nan
+    
+    
 
         results.append(gene_result)
 
@@ -223,22 +260,27 @@ def process_cell_state(cell_state):
     results_df = pd.DataFrame(results)
 
     # Multiple hypothesis correction per model comparison across genes
-    for model_name in formulas.keys():
-        if model_name == 'full_model':
-            continue
-        
-        lrt_pvals = [gene_result[f'{model_name}_lrt_pval'] for gene_result in results]
-        _, lrt_pvals_corrected, _, _ = multipletests(lrt_pvals, method='fdr_bh')
+    
+    # Collect all LRT p-values across all comparisons (columns that contain 'lrt_pval')
+    lrt_pval_columns = [col for col in results_df.columns if 'lrt_pval' in col]
 
-        # Assign corrected p-values back to the results
-        for i, gene_result in enumerate(results):
-            gene_result[f'{model_name}_lrt_pval_corrected'] = lrt_pvals_corrected[i]
+    # Flatten all LRT p-values into a single list
+    all_pvals = results_df[lrt_pval_columns].values.flatten()
 
-    # Save the results to CSV
-    output_file = f'241002_GLM_Updated_results_{cell_state}.csv'
-    results_df.to_csv(output_file, index=False)
-    print(f"Results saved for {cell_state} to {output_file}")
+    # Remove NaN values from the list
+    all_pvals = all_pvals[~pd.isna(all_pvals)]
 
+    # Apply Benjamini-Hochberg correction across all comparisons and all p-values
+    _, pvals_corrected, _, _ = multipletests(all_pvals, method='fdr_bh')
+
+    # Reshape the corrected p-values back into the same shape as the original DataFrame
+    corrected_pvals = pd.Series(pvals_corrected).values.reshape(results_df[lrt_pval_columns].shape)
+
+    # Assign the corrected p-values back to the corresponding columns in the DataFrame
+    for i, col in enumerate(lrt_pval_columns):
+        results_df[f'{col}_corrected'] = corrected_pvals[:, i]
+
+    results_df.to_csv(f'241003_GLM_Updated_results_{cell_state}.csv')
 # Parallelize the cell state processing using Pool
 if __name__ == '__main__':
     with Pool(processes=len(cell_states)) as pool:
